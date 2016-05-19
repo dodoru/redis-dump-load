@@ -4,40 +4,25 @@ try:
     import json
 except ImportError:
     import simplejson as json
-import redis
-import sys
-import functools
 
 try:
     import ijson as ijson_root
+
     have_streaming_load = True
 except ImportError:
     have_streaming_load = False
+
+from errors import ConcurrentModificationError, KeyDeletedError, KeyTypeChangedError, UnknownTypeError
+import redis
+
+redis_host = 'localhost'
+redis_password = None
+redis_port = 6379
 streaming_backend = None
 
-py3 = sys.version_info[0] == 3
 
-if py3:
-    base_exception_class = Exception
-else:
-    base_exception_class = StandardError
-
-class UnknownTypeError(base_exception_class):
-    pass
-
-class ConcurrentModificationError(base_exception_class):
-    pass
-
-# internal exceptions
-
-class KeyDeletedError(base_exception_class):
-    pass
-
-class KeyTypeChangedError(base_exception_class):
-    pass
-
-def client(host='localhost', port=6379, password=None, db=0,
-                 unix_socket_path=None, encoding='utf-8'):
+def client(host=redis_host, port=6379, password=redis_password, db=0,
+           unix_socket_path=None, encoding='utf-8'):
     if unix_socket_path is not None:
         r = redis.Redis(unix_socket_path=unix_socket_path,
                         password=password,
@@ -51,7 +36,8 @@ def client(host='localhost', port=6379, password=None, db=0,
                         charset=encoding)
     return r
 
-def dumps(host='localhost', port=6379, password=None, db=0, pretty=False,
+
+def dumps(host=redis_host, port=6379, password=redis_password, db=0, pretty=False,
           unix_socket_path=None, encoding='utf-8', keys='*'):
     r = client(host=host, port=port, password=password, db=db,
                unix_socket_path=unix_socket_path, encoding=encoding)
@@ -67,12 +53,13 @@ def dumps(host='localhost', port=6379, password=None, db=0, pretty=False,
         table[key] = {'type': type, 'value': value}
     return encoder.encode(table)
 
-def dump(fp, host='localhost', port=6379, password=None, db=0, pretty=False,
+
+def dump(fp, host=redis_host, port=6379, password=redis_password, db=0, pretty=False,
          unix_socket_path=None, encoding='utf-8', keys='*'):
     if pretty:
         # hack to avoid implementing pretty printing
         fp.write(dumps(host=host, port=port, password=password, db=db,
-            pretty=pretty, encoding=encoding))
+                       pretty=pretty, encoding=encoding))
         return
 
     r = client(host=host, port=port, password=password, db=db,
@@ -98,6 +85,7 @@ def dump(fp, host='localhost', port=6379, password=None, db=0, pretty=False,
         fp.write(item)
     fp.write('}')
 
+
 class StringReader(object):
     @staticmethod
     def send_command(p, key):
@@ -109,6 +97,7 @@ class StringReader(object):
         # however, our type check requires that the key exists
         return response.decode(encoding)
 
+
 class ListReader(object):
     @staticmethod
     def send_command(p, key):
@@ -117,6 +106,7 @@ class ListReader(object):
     @staticmethod
     def handle_response(response, pretty, encoding):
         return [v.decode(encoding) for v in response]
+
 
 class SetReader(object):
     @staticmethod
@@ -130,6 +120,7 @@ class SetReader(object):
             value.sort()
         return value
 
+
 class ZsetReader(object):
     @staticmethod
     def send_command(p, key):
@@ -138,6 +129,7 @@ class ZsetReader(object):
     @staticmethod
     def handle_response(response, pretty, encoding):
         return [(k.decode(encoding), score) for k, score in response]
+
 
 class HashReader(object):
     @staticmethod
@@ -151,6 +143,7 @@ class HashReader(object):
             value[k.decode(encoding)] = response[k].decode(encoding)
         return value
 
+
 readers = {
     'string': StringReader,
     'list': ListReader,
@@ -158,6 +151,7 @@ readers = {
     'zset': ZsetReader,
     'hash': HashReader,
 }
+
 
 # note: key is a byte string
 def _read_key(key, r, pretty, encoding):
@@ -181,6 +175,7 @@ def _read_key(key, r, pretty, encoding):
         raise KeyTypeChangedError
     value = reader.handle_response(results[1], pretty, encoding)
     return (type, value)
+
 
 def _reader(r, pretty, encoding, keys='*'):
     for encoded_key in r.keys(keys):
@@ -206,11 +201,13 @@ def _reader(r, pretty, encoding, keys='*'):
             # ran out of retries
             raise ConcurrentModificationError('Key %s is being concurrently modified' % key)
 
+
 def _empty(r):
     for key in r.keys():
         r.delete(key)
 
-def loads(s, host='localhost', port=6379, password=None, db=0, empty=False,
+
+def loads(s, host=redis_host, port=6379, password=redis_password, db=0, empty=False,
           unix_socket_path=None, encoding='utf-8'):
     r = client(host=host, port=port, password=password, db=db,
                unix_socket_path=unix_socket_path, encoding=encoding)
@@ -235,16 +232,17 @@ def loads(s, host='localhost', port=6379, password=None, db=0, empty=False,
         # Finally, execute again:
         p.execute()
 
-def load_lump(fp, host='localhost', port=6379, password=None, db=0,
-    empty=False, unix_socket_path=None, encoding='utf-8',
-):
+
+def load_lump(fp, host=redis_host, port=6379, password=redis_password, db=0,
+              empty=False, unix_socket_path=None, encoding='utf-8',
+              ):
     s = fp.read()
-    if py3:
-        # s can be a string or a bytes instance.
-        # if bytes, decode to a string because loads requires input to be a string.
-        if isinstance(s, bytes):
-            s = s.decode(encoding)
+    # s can be a string or a bytes instance.
+    # if bytes, decode to a string because loads requires input to be a string.
+    if isinstance(s, bytes):
+        s = s.decode(encoding)
     loads(s, host, port, password, db, empty, unix_socket_path, encoding)
+
 
 def get_ijson(local_streaming_backend):
     local_streaming_backend = local_streaming_backend or streaming_backend
@@ -254,6 +252,7 @@ def get_ijson(local_streaming_backend):
     else:
         ijson = ijson_root
     return ijson
+
 
 def ijson_top_level_items(file, local_streaming_backend):
     ijson = get_ijson(local_streaming_backend)
@@ -275,10 +274,11 @@ def ijson_top_level_items(file, local_streaming_backend):
     except StopIteration:
         pass
 
-def load_streaming(fp, host='localhost', port=6379, password=None, db=0,
-    empty=False, unix_socket_path=None, encoding='utf-8',
-    streaming_backend=None,
-):
+
+def load_streaming(fp, host=redis_host, port=6379, password=redis_password, db=0,
+                   empty=False, unix_socket_path=None, encoding='utf-8',
+                   streaming_backend=None,
+                   ):
     r = client(host=host, port=port, password=password, db=db,
                unix_socket_path=unix_socket_path, encoding=encoding)
 
@@ -299,17 +299,19 @@ def load_streaming(fp, host='localhost', port=6379, password=None, db=0,
         # Finally, execute again:
         p.execute()
 
-def load(fp, host='localhost', port=6379, password=None, db=0,
-    empty=False, unix_socket_path=None, encoding='utf-8',
-    streaming_backend=None,
-):
+
+def load(fp, host=redis_host, port=6379, password=redis_password, db=0,
+         empty=False, unix_socket_path=None, encoding='utf-8',
+         streaming_backend=None,
+         ):
     if have_streaming_load:
         load_streaming(fp, host=host, port=port, password=password, db=db,
-            empty=empty, unix_socket_path=unix_socket_path, encoding=encoding,
-            streaming_backend=streaming_backend)
+                       empty=empty, unix_socket_path=unix_socket_path, encoding=encoding,
+                       streaming_backend=streaming_backend)
     else:
         load_lump(fp, host=host, port=port, password=password, db=db,
-            empty=empty, unix_socket_path=unix_socket_path, encoding=encoding)
+                  empty=empty, unix_socket_path=unix_socket_path, encoding=encoding)
+
 
 def _writer(r, key, type, value):
     r.delete(key)
@@ -328,6 +330,7 @@ def _writer(r, key, type, value):
         r.hmset(key, value)
     else:
         raise UnknownTypeError("Unknown key type: %s" % type)
+
 
 def main():
     import optparse
@@ -424,21 +427,27 @@ def main():
         parser.add_option('-k', '--keys', help='dump only keys matching specified glob-style pattern')
         parser.add_option('-o', '--output', help='write to OUTPUT instead of stdout')
         parser.add_option('-y', '--pretty', help='Split output on multiple lines and indent it', action='store_true')
-        parser.add_option('-E', '--encoding', help='set encoding to use while decoding data from redis', default='utf-8')
+        parser.add_option('-E', '--encoding', help='set encoding to use while decoding data from redis',
+                          default='utf-8')
     elif help == LOAD:
         parser.add_option('-d', '--db', help='load into DATABASE (0-N, default 0)')
         parser.add_option('-e', '--empty', help='delete all keys in destination db prior to loading')
         parser.add_option('-E', '--encoding', help='set encoding to use while encoding data to redis', default='utf-8')
         parser.add_option('-B', '--backend', help='use specified ijson backend, default is pure Python')
     else:
-        parser.add_option('-l', '--load', help='load data into redis (default is to dump data from redis)', action='store_true')
+        parser.add_option('-l', '--load', help='load data into redis (default is to dump data from redis)',
+                          action='store_true')
         parser.add_option('-d', '--db', help='dump or load into DATABASE (0-N, default 0)')
         parser.add_option('-k', '--keys', help='dump only keys matching specified glob-style pattern')
         parser.add_option('-o', '--output', help='write to OUTPUT instead of stdout (dump mode only)')
-        parser.add_option('-y', '--pretty', help='Split output on multiple lines and indent it (dump mode only)', action='store_true')
-        parser.add_option('-e', '--empty', help='delete all keys in destination db prior to loading (load mode only)', action='store_true')
-        parser.add_option('-E', '--encoding', help='set encoding to use while decoding data from redis', default='utf-8')
-        parser.add_option('-B', '--backend', help='use specified ijson backend, default is pure Python (load mode only)')
+        parser.add_option('-y', '--pretty', help='Split output on multiple lines and indent it (dump mode only)',
+                          action='store_true')
+        parser.add_option('-e', '--empty', help='delete all keys in destination db prior to loading (load mode only)',
+                          action='store_true')
+        parser.add_option('-E', '--encoding', help='set encoding to use while decoding data from redis',
+                          default='utf-8')
+        parser.add_option('-B', '--backend',
+                          help='use specified ijson backend, default is pure Python (load mode only)')
     options, args = parser.parse_args()
 
     if hasattr(options, 'load') and options.load:
